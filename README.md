@@ -37,7 +37,7 @@ The system uses Google ADK's native `sub_agents` pattern for agent orchestration
 ### Conversation Handler (TravelAssistant Class)
 
 The `TravelAssistant` class wraps the multi-agent system and provides:
-- **Context Management**: Maintains conversation history from last 6 messages
+- **Context Management**: Maintains conversation history from last 10 messages
 - **Message Aggregation**: Supports rapid user messages (sent as batch)
 - **Response Enrichment**: Injects full activity data (images, policies) post-LLM response
 - **Booking Persistence**: Saves confirmed bookings to MongoDB
@@ -63,7 +63,10 @@ Handled via the `/api/supervisor/reply` endpoint:
 │ • Message        │     │                      │     │             │
 │   Aggregation    │     │ Google ADK Runner    │     │             │
 │                  │     │ Gemini 2.5 Flash     │     │             │
+│                  │     │ ChromaDB + OpenAI   │     │             │
+│                  │     │   embeddings         │     │             │
 │                  │     │ SendGrid (Email)     │     │             │
+│                  │     │ Opik (optional)      │     │             │
 └──────────────────┘     └──────────────────────┘     └─────────────┘
 ```
 
@@ -72,13 +75,15 @@ Handled via the `/api/supervisor/reply` endpoint:
 ## Project Structure
 
 ```
-/app/
+All-out/
 ├── backend/
-│   ├── agents.py         # Multi-agent system (Google ADK)
-│   ├── prompts.py        # Separate prompts file for all agents
-│   ├── server.py         # FastAPI endpoints
-│   ├── mock_data.py      # 12 Dubai activities database
-│   ├── email_service.py  # SendGrid escalation emails
+│   ├── agents.py           # Multi-agent system (Google ADK)
+│   ├── prompts.py          # Separate prompts file for all agents
+│   ├── server.py           # FastAPI endpoints
+│   ├── mock_data.py        # 12 Dubai activities source data
+│   ├── chroma_activities.py # ChromaDB catalog + semantic search (OpenAI embeddings)
+│   ├── email_service.py    # SendGrid escalation emails
+│   ├── opik_tracing.py     # Optional Opik/OpenTelemetry tracing
 │   └── requirements.txt
 ├── frontend/
 │   └── src/
@@ -100,12 +105,14 @@ Handled via the `/api/supervisor/reply` endpoint:
 
 | Layer | Technology |
 |-------|------------|
-| Frontend | React, Tailwind CSS, shadcn/ui, Lucide icons |
+| Frontend | React, Tailwind CSS, shadcn/ui, Lucide icons, Craco |
 | Backend | FastAPI (Python) |
 | Agent Framework | Google ADK (Agent Development Kit) |
 | LLM | Gemini 2.5 Flash |
+| Activity Search | ChromaDB + OpenAI embeddings (text-embedding-3-small) |
 | Database | MongoDB (Motor async driver) |
 | Email | SendGrid |
+| Tracing | Opik (optional, OpenTelemetry) |
 | Styling | WhatsApp-themed (custom CSS) |
 
 ---
@@ -127,9 +134,11 @@ All agent prompts are separated into `/backend/prompts.py` for maintainability:
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- MongoDB running locally
+- MongoDB (local or Atlas connection string)
+- **Google API Key** (for Gemini 2.5 Flash)
+- **OpenAI API Key** (for ChromaDB semantic search — text-embedding-3-small)
 - SendGrid API key (optional, for email escalation)
-- Google API Key (for Gemini 2.5 Flash)
+- Opik API key (optional, for tracing)
 
 ### Backend Setup
 
@@ -137,20 +146,28 @@ All agent prompts are separated into `/backend/prompts.py` for maintainability:
 cd backend
 pip install -r requirements.txt
 
-# Create .env file
+# Create .env file (no .env.example in repo — use this template)
+# Required: MONGO_URL, DB_NAME, GOOGLE_API_KEY, OPENAI_API_KEY
 cat > .env << EOF
 MONGO_URL="mongodb://localhost:27017"
 DB_NAME="dubai_travel_assistant"
 CORS_ORIGINS="*"
 GOOGLE_API_KEY=your_google_api_key
+OPENAI_API_KEY=your_openai_api_key
 SENDGRID_API_KEY=your_sendgrid_key
 SENDER_EMAIL=your_verified_email@domain.com
 SUPERVISOR_EMAIL=supervisor@domain.com
+# Optional: Opik tracing
+# OPIK_API_KEY=
+# OPIK_PROJECT_NAME=dubai-travel-assistant
+# OPIK_WORKSPACE=default
 EOF
 
 # Run
 uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 ```
+
+On first run, the backend seeds ChromaDB from `mock_data.py` (calls OpenAI embeddings). Data is stored in `backend/chroma_data` (or `CHROMA_PERSIST_DIR` in Docker).
 
 ### Frontend Setup
 
@@ -159,30 +176,23 @@ cd frontend
 yarn install
 
 # Create .env
-cat > .env << EOF
-REACT_APP_BACKEND_URL=http://localhost:8001
-EOF
+echo "REACT_APP_BACKEND_URL=http://localhost:8001" > .env
 
 yarn start
 ```
 
 ### Docker (full stack)
 
-Both frontend and backend run in containers. Env vars are handled as follows:
+Both frontend and backend run in containers.
 
-- **Backend**: Uses `backend/.env` (copy from `backend/.env.example` and fill in values). Required: `MONGO_URL`, `DB_NAME`. Optional: `CORS_ORIGINS`, `GOOGLE_API_KEY`, SendGrid/Opik vars.
-- **Frontend**: `REACT_APP_BACKEND_URL` is set at **build time**. Default is `http://localhost:8001` so the browser can reach the API when both services are on the same host. Override with a root `.env` or in `docker-compose`:
-  ```bash
-  REACT_APP_BACKEND_URL=http://localhost:8001 docker-compose up --build
-  ```
-  Or create a root `.env` with `REACT_APP_BACKEND_URL=http://localhost:8001`.
+- **Backend**: Uses `backend/.env`. Create it from the Backend Setup template above. Required: `MONGO_URL`, `DB_NAME`, `GOOGLE_API_KEY`, `OPENAI_API_KEY`. Optional: `CORS_ORIGINS`, SendGrid vars, Opik vars (`OPIK_API_KEY`, `OPIK_PROJECT_NAME`, `OPIK_WORKSPACE`). Chroma data is persisted in volume `backend_chroma_data`.
+- **Frontend**: `REACT_APP_BACKEND_URL` is set at **build time** (default: `http://localhost:8001`). Override with a root `.env`: `REACT_APP_BACKEND_URL=http://localhost:8001`.
 
 **Steps:**
 
 1. Create backend env file:
    ```bash
-   cp backend/.env.example backend/.env
-   # Edit backend/.env and set MONGO_URL, DB_NAME, and any optional keys (GOOGLE_API_KEY, etc.)
+   # Create backend/.env with MONGO_URL, DB_NAME, GOOGLE_API_KEY, OPENAI_API_KEY (see Backend Setup)
    ```
 
 2. Build and run:
@@ -192,8 +202,6 @@ Both frontend and backend run in containers. Env vars are handled as follows:
 
 3. Open the app at **http://localhost:3000**. The API is at **http://localhost:8001**.
 
-ChromaDB data is stored in a Docker volume (`backend_chroma_data`) so it persists between runs.
-
 ---
 
 ## API Endpoints
@@ -202,10 +210,11 @@ ChromaDB data is stored in a Docker volume (`backend_chroma_data`) so it persist
 |--------|----------|-------------|
 | POST | `/api/chat` | Send message through multi-agent system |
 | GET | `/api/conversations/{session_id}` | Get chat history |
-| GET | `/api/activities` | List all 12 activities |
+| GET | `/api/activities` | List all activities (from ChromaDB) |
 | GET | `/api/activities/{id}` | Activity details |
 | POST | `/api/supervisor/reply` | Supervisor HITL reply |
 | GET | `/api/bookings/{session_id}` | Session bookings |
+| POST | `/api/seed` | Seed info (activities count; Chroma seeded at startup) |
 | GET | `/api/health` | Health check |
 
 ### Chat Response Types
@@ -234,13 +243,14 @@ The multi-agent system returns structured JSON responses:
 ## Features
 
 ### Activity Booking Agent
-- Queries 12 Dubai activities from mock database
+- Queries Dubai activities via ChromaDB semantic search (tool: `search_activities`)
 - Handles variations (time slots, group sizes, packages)
 - Collects booking info: activity, variation, time slot, group size, customer name
 - Processes and saves bookings to MongoDB
 - Escalates unavailable activities to human supervisor via email
 
 ### Information Agent
+- Uses ChromaDB search (`search_activities`) for activity discovery
 - Provides activity images in rich cards
 - Shares cancellation and reschedule policies
 - Displays pricing for all variations
@@ -267,9 +277,11 @@ The multi-agent system returns structured JSON responses:
 
 ---
 
-## Mock Database
+## Activity Data & ChromaDB
 
-12 Dubai activities with full details in `/backend/mock_data.py`:
+Activity source: **12 Dubai activities** in `/backend/mock_data.py`. On startup, the backend seeds **ChromaDB** from this data (one document per variation, embedded with OpenAI `text-embedding-3-small`). The agents use the `search_activities` tool to query ChromaDB; `/api/activities` and `/api/activities/{id}` also read from Chroma.
+
+Activities:
 
 1. Burj Khalifa At The Top
 2. Desert Safari Adventure
@@ -290,23 +302,26 @@ Each activity includes: name, description, image, category, multiple variations 
 
 ## Google ADK Integration
 
-The system uses Google ADK's `LlmAgent` and `InMemoryRunner`:
+The system uses Google ADK's `LlmAgent` and `InMemoryRunner`. Both sub-agents have the `search_activities` tool (ChromaDB semantic search):
 
 ```python
 from google.adk.agents import LlmAgent
 from google.adk.runners import InMemoryRunner
+from chroma_activities import search_activities
 
-# Create specialized agents
+# Specialized agents with ChromaDB search tool
 activity_booking_agent = LlmAgent(
     name="activity_booking_agent",
     model="gemini-2.5-flash",
     instruction=ACTIVITY_BOOKING_AGENT_PROMPT,
+    tools=[search_activities],
 )
 
 information_agent = LlmAgent(
     name="information_agent",
     model="gemini-2.5-flash",
     instruction=INFORMATION_AGENT_PROMPT,
+    tools=[search_activities],
 )
 
 # Root orchestrator with sub-agents
@@ -320,6 +335,12 @@ root_agent = LlmAgent(
 # Runner for executing agent conversations
 runner = InMemoryRunner(agent=root_agent, app_name="dubai_travel_assistant")
 ```
+
+---
+
+## Optional: Opik Tracing
+
+The backend supports **Opik** for observability. Set `OPIK_API_KEY` (and optionally `OPIK_PROJECT_NAME`, `OPIK_WORKSPACE`) in `backend/.env`. `opik_tracing.py` configures OpenTelemetry so agent runs, tool calls, and OpenAI embedding usage appear in the Opik dashboard. If `OPIK_API_KEY` is unset, tracing is disabled.
 
 ---
 
