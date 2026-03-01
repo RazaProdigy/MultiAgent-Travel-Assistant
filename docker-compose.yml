@@ -1,0 +1,34 @@
+# MultiAgent Travel Assistant - full stack
+# Set required env in backend/.env (copy from backend/.env.example) or pass here.
+# Frontend REACT_APP_BACKEND_URL is the URL the browser uses to reach the API (default: http://localhost:8001).
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./backend/.env
+    environment:
+      - CHROMA_PERSIST_DIR=/app/chroma_data
+    volumes:
+      - backend_chroma_data:/app/chroma_data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # URL the browser will use to call the API (host-visible backend port)
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost:8001}
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_chroma_data:
