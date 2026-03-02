@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+import re
+from fastapi import FastAPI, APIRouter, HTTPException, Form
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -156,15 +157,8 @@ async def get_activity(activity_id: str):
 # Supervisor / HITL Endpoints
 # ──────────────────────────────────
 
-@api_router.post("/supervisor/reply")
-async def supervisor_reply(body: SupervisorReply):
-    """Simulate supervisor replying to an escalation."""
-    session_id = body.session_id
-    message = body.message.strip()
-
-    if not message:
-        raise HTTPException(status_code=400, detail="Reply cannot be empty")
-
+def _store_supervisor_reply(session_id: str, message: str):
+    """Store a supervisor reply so it appears in the customer's chat (shared helper)."""
     doc = {
         "id": str(uuid.uuid4()),
         "session_id": session_id,
@@ -174,8 +168,79 @@ async def supervisor_reply(body: SupervisorReply):
         "type": "supervisor",
         "data": {"type": "supervisor", "message": message},
     }
+    return doc
+
+
+@api_router.post("/supervisor/reply")
+async def supervisor_reply(body: SupervisorReply):
+    """Supervisor replies via the panel (or API). Message is stored and shown in the customer's chat."""
+    session_id = body.session_id
+    message = body.message.strip()
+
+    if not message:
+        raise HTTPException(status_code=400, detail="Reply cannot be empty")
+
+    doc = _store_supervisor_reply(session_id, message)
     await db.messages.insert_one(doc)
     return {"status": "ok", "message": "Supervisor reply recorded"}
+
+
+@api_router.post("/webhooks/sendgrid-inbound")
+async def sendgrid_inbound_webhook(
+    from_email: str = Form(None, alias="from"),
+    to_email: str = Form(None, alias="to"),
+    subject: str = Form(""),
+    text: str = Form(""),
+    html: str = Form(""),
+):
+    """
+    SendGrid Inbound Parse webhook: when the supervisor replies to an escalation email,
+    the reply is POSTed here. We extract session_id from the 'to' address (reply-{session_id}@domain)
+    or from the subject, then store the reply so it appears in the customer's chat.
+    """
+    # Prefer session from Reply-To recipient: reply-sess-xxx@inbound.example.com
+    session_id = None
+    if to_email:
+        match = re.match(r"reply-(.+?)@", to_email, re.IGNORECASE)
+        if match:
+            session_id = match.group(1).strip()
+    if not session_id and subject:
+        # Fallback: "Re: ... Session sess-xxx" or "Session sess-xxx"
+        match = re.search(r"Session\s+([a-zA-Z0-9\-]+)", subject, re.IGNORECASE)
+        if match:
+            session_id = match.group(1).strip()
+        if not session_id:
+            match = re.search(r"(sess-[a-f0-9\-]+)", subject, re.IGNORECASE)
+            if match:
+                session_id = match.group(1).strip()
+
+    if not session_id:
+        logger.warning("Inbound email: could not determine session_id from to=%r subject=%r", to_email, subject)
+        return {"status": "ignored", "reason": "no_session_id"}
+
+    body_text = (text or "").strip() or (html or "").strip()
+    if not body_text:
+        return {"status": "ignored", "reason": "empty_body"}
+    # If we only have HTML, strip tags
+    if not text and html:
+        body_text = re.sub(r"<[^>]+>", " ", body_text)
+        body_text = re.sub(r"\s+", " ", body_text).strip()
+
+    # Strip quoted reply and signature (simple: take first paragraph or first 2000 chars)
+    if len(body_text) > 2000:
+        body_text = body_text[:2000].rstrip() + "..."
+    # Remove common reply prefixes
+    for prefix in ("On .+ wrote:", "From:.*?", "To:.*?", "Sent:.*?", "Reply to this email"):
+        body_text = re.sub(prefix, "", body_text, flags=re.IGNORECASE | re.DOTALL)
+    body_text = re.sub(r"\n{3,}", "\n\n", body_text).strip()
+
+    if not body_text:
+        return {"status": "ignored", "reason": "empty_after_clean"}
+
+    doc = _store_supervisor_reply(session_id, body_text)
+    await db.messages.insert_one(doc)
+    logger.info("Inbound email relayed to chat for session_id=%s", session_id)
+    return {"status": "ok", "session_id": session_id}
 
 
 # ──────────────────────────────────

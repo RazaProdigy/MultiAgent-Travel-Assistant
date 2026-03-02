@@ -3,8 +3,11 @@ import { useParams, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { Send, CheckCircle, AlertTriangle, MessageSquare, ArrowLeft } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+// Use explicit backend URL; fallback so "Reply to Customer" link from email works when env is missing (e.g. dev)
+const BACKEND_URL =
+  process.env.REACT_APP_BACKEND_URL ||
+  (typeof window !== "undefined" && `${window.location.protocol}//${window.location.hostname}:8001`);
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : "/api";
 
 export default function SupervisorPanel() {
   const { sessionId } = useParams();
@@ -21,6 +24,10 @@ export default function SupervisorPanel() {
   // Load conversation context
   useEffect(() => {
     async function loadConversation() {
+      if (!sessionId) {
+        setLoadingConvo(false);
+        return;
+      }
       try {
         const res = await axios.get(`${API}/conversations/${sessionId}`);
         setConversation(res.data.messages || []);
@@ -30,7 +37,7 @@ export default function SupervisorPanel() {
         setLoadingConvo(false);
       }
     }
-    if (sessionId) loadConversation();
+    loadConversation();
   }, [sessionId]);
 
   const handleSubmit = async (e) => {
@@ -63,6 +70,28 @@ export default function SupervisorPanel() {
     .filter((m) => m.role === "user")
     .slice(-5);
 
+  if (!sessionId) {
+    return (
+      <div className="min-h-screen bg-[#f0f2f5] flex items-center justify-center p-6" data-testid="supervisor-panel">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 max-w-md text-center">
+          <AlertTriangle className="mx-auto text-amber-500 mb-4" size={48} />
+          <h2 className="text-lg font-semibold text-gray-900 mb-2">Invalid or missing session</h2>
+          <p className="text-sm text-gray-600 mb-4">
+            Use the "Reply to Customer" link from the escalation email to open this panel with the correct session.
+          </p>
+          <a
+            href="/"
+            className="inline-flex items-center gap-2 bg-[#075E54] text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-[#054c44]"
+            data-testid="back-to-chat"
+          >
+            <ArrowLeft size={18} />
+            Back to chat
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f0f2f5]" data-testid="supervisor-panel">
       {/* Header */}
@@ -74,7 +103,7 @@ export default function SupervisorPanel() {
           <div>
             <h1 className="text-xl font-semibold">Supervisor Panel</h1>
             <p className="text-sm text-white/70">
-              Session: {sessionId ? sessionId.slice(0, 12) + "..." : "N/A"}
+              Session: {sessionId.slice(0, 12)}...
             </p>
           </div>
         </div>

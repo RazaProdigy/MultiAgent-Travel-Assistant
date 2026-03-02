@@ -6,17 +6,20 @@ import os
 import logging
 import urllib.parse
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import Mail, ReplyTo
 
 logger = logging.getLogger(__name__)
 
 
 def _get_app_base_url() -> str:
-    """Get the frontend app base URL for supervisor reply links."""
+    """Get the frontend app base URL for supervisor reply links (used in escalation email)."""
+    # Explicit public URL so the "Reply to Customer" link works when opened from email (e.g. in production)
+    public = os.environ.get("APP_PUBLIC_URL", "").strip()
+    if public:
+        return public.rstrip("/")
     cors = os.environ.get("CORS_ORIGINS", "")
     if cors and cors != "*":
-        return cors.split(",")[0].strip()
-    # Fallback when CORS_ORIGINS not set (e.g. local dev)
+        return cors.split(",")[0].strip().rstrip("/")
     return "http://localhost:5173"
 
 
@@ -62,6 +65,9 @@ def send_escalation_email(user_query: str, session_id: str, context: str) -> boo
                 <p style="margin: 12px 0 0; font-size: 12px; color: #8696a0;">
                     Click the button above to open the supervisor panel and send your reply directly to the customer's chat.
                 </p>
+                <p style="margin: 8px 0 0; font-size: 12px; color: #8696a0;">
+                    You can also reply to this email — your reply will be relayed to the customer's chat.
+                </p>
             </div>
         </div>
         <div style="background: #f9f9f9; padding: 16px; border-radius: 0 0 12px 12px; border: 1px solid #e0e0e0; border-top: none;">
@@ -77,8 +83,13 @@ def send_escalation_email(user_query: str, session_id: str, context: str) -> boo
         from_email=sender,
         to_emails=supervisor,
         subject=subject,
-        html_content=html_content
+        html_content=html_content,
     )
+    # Optional: Reply-To for reply-by-email (e.g. reply-sess-xxx@inbound.yourdomain.com)
+    inbound_domain = os.environ.get("INBOUND_REPLY_DOMAIN", "").strip()
+    if inbound_domain:
+        safe_sid = session_id.replace("@", "-").strip()
+        message.reply_to = ReplyTo(f"reply-{safe_sid}@{inbound_domain}")
 
     try:
         sg = SendGridAPIClient(api_key)

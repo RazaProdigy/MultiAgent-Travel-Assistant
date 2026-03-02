@@ -4,8 +4,10 @@ import { Send, Phone, Video, MoreVertical, Smile } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const BACKEND_URL =
+  process.env.REACT_APP_BACKEND_URL ||
+  (typeof window !== "undefined" && `${window.location.protocol}//${window.location.hostname}:8001`);
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : "/api";
 
 const AGGREGATION_DELAY = 2500; // ms to wait before sending aggregated messages
 
@@ -86,7 +88,12 @@ export default function ChatInterface() {
     loadHistory();
   }, [sessionId]);
 
-  // Poll for new messages (supervisor replies)
+  // Poll for new messages (supervisor replies); poll more often when escalation is present
+  const hasEscalation = messages.some(
+    (m) => m.type === "escalation" || (m.data && m.data.type === "escalation")
+  );
+  const pollInterval = hasEscalation ? 2000 : 5000;
+
   useEffect(() => {
     pollingRef.current = setInterval(async () => {
       try {
@@ -102,9 +109,9 @@ export default function ChatInterface() {
       } catch {
         // silent
       }
-    }, 5000);
+    }, pollInterval);
     return () => clearInterval(pollingRef.current);
-  }, [sessionId]);
+  }, [sessionId, pollInterval]);
 
   // Send aggregated messages to backend
   const flushPendingMessages = useCallback(async () => {
